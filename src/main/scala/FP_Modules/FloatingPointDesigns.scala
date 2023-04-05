@@ -1,8 +1,11 @@
 package FP_Modules
 import Binary_Modules.BinaryDesigns._
 import chisel3._
-import Chisel.log2Ceil
+import Chisel.{log2Ceil, log2Floor}
+import chiseltest.RawTester.test
+import chisel3.tester._
 
+import java.io.PrintWriter
 import scala.collection.mutable
 
 object FloatingPointDesigns {
@@ -1354,6 +1357,982 @@ object FloatingPointDesigns {
     reg_out_s := new_s4 ## new_out_exp4 ## new_out_frac4
     // combine all of the final results
     io.out_s := reg_out_s
+  }
+
+  // 13 cycle adder
+  class FP_adder_13ccs(bw: Int) extends Module {
+    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+    val io = IO(new Bundle() {
+      val in_en = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val in_b = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+    })
+    var exponent = 0
+    var mantissa = 0
+    if (bw == 16) {
+      exponent = 5
+      mantissa = 10
+    } else if (bw == 32) {
+      exponent = 8
+      mantissa = 23
+    } else if (bw == 64) {
+      exponent = 11
+      mantissa = 52
+    } else if (bw == 128) {
+      exponent = 15
+      mantissa = 112
+    }
+
+    // sign part of ieee number
+    val sign = Wire(Vec(2, UInt(1.W)))
+    sign(0) := io.in_a(bw - 1)
+    sign(1) := io.in_b(bw - 1)
+    val exp = Wire(Vec(2, UInt(exponent.W)))
+
+    when(io.in_a(bw - 2, mantissa) > BigInt(2).pow(exponent).U - 2.U) { // largest normal exponent
+      exp(0) := BigInt(2).pow(exponent).U - 2.U
+    }.elsewhen(io.in_a(bw-2, mantissa) < 1.U){ // smallest normal exponent
+      exp(0) := 1.U
+    }.otherwise {
+      exp(0) := io.in_a(bw - 2, mantissa)
+    }
+    when(io.in_b(bw - 2, mantissa) > BigInt(2).pow(exponent).U - 2.U) {
+      exp(1) := BigInt(2).pow(exponent).U - 2.U
+    }.elsewhen(io.in_b(bw-2,mantissa) < 1.U){
+      exp(1) := 1.U
+    }.otherwise {
+      exp(1) := io.in_b(bw - 2, mantissa)
+    }
+
+
+    val frac = Wire(Vec(2, UInt(mantissa.W)))
+    frac(0) := io.in_a(mantissa - 1, 0)
+    frac(1) := io.in_b(mantissa - 1, 0)
+
+
+    val whole_frac = Wire(Vec(2, UInt((mantissa + 1).W)))
+    whole_frac(0) := 1.U ## frac(0)
+    whole_frac(1) := 1.U ## frac(1)
+
+    val  sign_reg = RegInit(VecInit.fill(11)(VecInit.fill(2)(0.U(1.W))))
+    val   exp_reg = RegInit(VecInit.fill(3)(VecInit.fill(2)(0.U(exponent.W))))
+    val  frac_reg = RegInit(VecInit.fill(3)(VecInit.fill(2)(0.U(mantissa.W))))
+    val wfrac_reg = RegInit(VecInit.fill(3)(VecInit.fill(2)(0.U((mantissa+1).W))))
+
+    val subber_out_s_reg = RegInit(VecInit.fill(2)(0.U(exponent.W)))
+    val subber_out_c_reg = RegInit(VecInit.fill(2)(0.U(1.W)))
+
+    val wire_temp_add_in_reg = RegInit(VecInit.fill(2)(VecInit.fill(2)(0.U((mantissa+1).W))))
+
+    val    ref_s_reg = RegInit(VecInit.fill(8)(0.U(1.W)))
+    val ref_frac_reg = RegInit(VecInit.fill(8)(0.U(mantissa.W)))
+    val  ref_exp_reg = RegInit(VecInit.fill(8)(0.U(exponent.W)))
+    val  sub_exp_reg = RegInit(VecInit.fill(8)(0.U(exponent.W)))
+
+    val adder_io_out_s_reg = RegInit(VecInit.fill(3)(0.U((mantissa+1).W)))
+    val adder_io_out_c_reg = RegInit(VecInit.fill(1)(0.U(1.W)))
+
+    val        new_s_reg = RegInit(VecInit.fill(6)(0.U(1.W)))
+    val new_out_frac_reg = RegInit(VecInit.fill(1)(0.U(mantissa.W)))
+    val  new_out_exp_reg = RegInit(VecInit.fill(1)(0.U(exponent.W)))
+    val E_reg = RegInit(VecInit.fill(5)(0.U(1.W)))
+    val D_reg = RegInit(VecInit.fill(5)(0.U(1.W)))
+
+    val adder_result_reg = RegInit(VecInit.fill(3)(0.U((mantissa+1).W)))
+
+    val leadingOne_reg = RegInit(VecInit.fill(2)(0.U((log2Floor(bw) + 1).W)))
+
+    val io_in_a_reg = RegInit(VecInit.fill(11)(0.U(bw.W)))
+    val io_in_b_reg = RegInit(VecInit.fill(11)(0.U(bw.W)))
+
+    val subber2_out_s_reg = RegInit(VecInit.fill(1)(0.U(exponent.W)))
+    val subber2_out_c_reg = RegInit(VecInit.fill(1)(0.U(1.W)))
+
+
+
+    val ref_s    = Wire(UInt(1.W)) // sign of the larger input
+    val ref_frac = Wire(UInt(mantissa.W)) // mantissa/fractional part of larger input
+    val ref_exp = Wire(UInt(exponent.W)) // exponent of larger inpui
+    val sub_exp = Wire(UInt(exponent.W)) // temporarily holds the result of exp(0) - exp(1) (difference in exponents)
+
+
+    val subber = Module(new full_subber(exponent))
+    subber.io.in_a := exp_reg(0)(0) // determine the difference // unsigned, but we can use 2s complement to determine a below 0 result
+    subber.io.in_b := exp_reg(0)(1) // in such an event, the carry flag will be set high
+    subber.io.in_c := 0.U
+
+    // add the fractional/mantissa parts of the ieee numbers together
+    val adder = Module(new full_adder(mantissa + 1))
+    adder.io.in_c := 0.U
+
+    val wire_temp_add_in = Wire(Vec(2, UInt((mantissa+1).W)))
+
+    val cmpl_subber_out_s_reg = RegInit(VecInit.fill(1)(0.U(exponent.W)))
+    when(io.in_en){
+      cmpl_subber_out_s_reg(0) := 1.U + ~subber_out_s_reg(0)
+    }
+
+    when(subber_out_c_reg(1) === 1.U) {
+      ref_exp := exp_reg(2)(1)
+      sub_exp := cmpl_subber_out_s_reg(0)
+      ref_s := sign_reg(2)(1)
+      ref_frac := frac_reg(2)(1)
+      wire_temp_add_in(0) := wfrac_reg(2)(0) >> cmpl_subber_out_s_reg(0)
+      wire_temp_add_in(1) := wfrac_reg(2)(1)
+    }.otherwise {
+      ref_exp := exp_reg(2)(0)
+      sub_exp := subber_out_s_reg(1)
+      ref_s := sign_reg(2)(0)
+      ref_frac := frac_reg(2)(0)
+      wire_temp_add_in(0) := wfrac_reg(2)(0)
+      wire_temp_add_in(1) := wfrac_reg(2)(1) >> subber_out_s_reg(1)
+    }
+
+    val cmpl_wire_temp_add_in_reg = RegInit(VecInit.fill(1)(VecInit.fill(2)(0.U((mantissa+1).W))))
+    when(io.in_en){
+      cmpl_wire_temp_add_in_reg(0)(0) := 1.U + ~(wire_temp_add_in_reg(0)(0))
+      cmpl_wire_temp_add_in_reg(0)(1) := 1.U + ~(wire_temp_add_in_reg(0)(1))
+    }
+
+    adder.io.in_a := Mux(sign_reg(4).asUInt === 1.U, cmpl_wire_temp_add_in_reg(0)(0), wire_temp_add_in_reg(1)(0))
+    adder.io.in_b := Mux(sign_reg(4).asUInt === 2.U, cmpl_wire_temp_add_in_reg(0)(1), wire_temp_add_in_reg(1)(1))
+
+    val new_s        = Wire(UInt(1.W)) // will hold the final sign result
+    val new_out_frac = Wire(UInt(mantissa.W)) // will hold the final mantissa result
+    val new_out_exp = Wire(UInt(exponent.W)) // will hold the final exponent result
+
+    new_s := (~adder_io_out_c_reg(0) & (sign_reg(5)(0) | sign_reg(5)(1))) | (sign_reg(5)(0) & sign_reg(5)(1)) // this binary equation gives the new sign of the sum
+    new_out_exp := 0.U
+    new_out_frac := 0.U
+
+    val D = Wire(UInt(1.W)) // will indicate in which direction the mantissa sum will have to be shifted to be correct. (D = 0 indicates current exponent needs to be increased, D= 1 indicates that the current exponent needs to be decreased)
+    val E = Wire(UInt(1.W)) // will indicate if there is no need for adjusting the mantissa sum and we can leave it as it is.
+
+    D := (~adder_io_out_c_reg(0)) | (sign_reg(5)(0) ^ sign_reg(5)(1))
+
+    E := (~adder_io_out_c_reg(0) & ~adder_io_out_s_reg(0)(mantissa)) | (~adder_io_out_c_reg(0) & ~(sign_reg(5)(0) ^ sign_reg(5)(1))) | (adder_io_out_c_reg(0) & adder_io_out_s_reg(0)(mantissa) & (sign_reg(5)(0) ^ sign_reg(5)(1)))
+
+    val cmpl_adder_io_out_s_reg = RegInit(VecInit.fill(1)(0.U((mantissa+1).W)))
+
+    when(io.in_en){
+      cmpl_adder_io_out_s_reg(0) := 1.U + ~adder_io_out_s_reg(1)
+    }
+
+    val adder_result = Wire(UInt((mantissa + 1).W))
+    adder_result := Mux((new_s_reg(1) & sign_reg(7).asUInt.xorR).asBool, cmpl_adder_io_out_s_reg(0), adder_io_out_s_reg(2))
+
+    val leadingOne = Wire(UInt((log2Floor(bw) + 1).W))
+    leadingOne := VecInit(adder_result_reg(0).asBools).lastIndexWhere(x=>x) +& 1.U
+    val subber2 = Module(new full_subber(exponent))
+    subber2.io.in_a := ref_exp_reg(6)
+    subber2.io.in_b := ((mantissa + 1).U - leadingOne_reg(0))
+    subber2.io.in_c := 0.U
+
+
+    when(io.in_en){
+      io_in_a_reg(0) := io.in_a
+      io_in_b_reg(0) := io.in_b
+
+      sign_reg(0) := sign
+      exp_reg(0) := exp
+      frac_reg(0) := frac
+      wfrac_reg(0) := whole_frac
+      //
+      subber_out_s_reg(0) := subber.io.out_s
+      subber_out_c_reg(0) := subber.io.out_c
+      //
+      ref_s_reg(0) := ref_s
+      ref_frac_reg(0) := ref_frac
+      ref_exp_reg(0) := ref_exp
+      sub_exp_reg(0) := sub_exp
+      //
+      wire_temp_add_in_reg(0) := wire_temp_add_in
+      //
+      new_s_reg(0) := new_s
+      //      new_out_frac_reg(0) := new_out_frac
+      //       new_out_exp_reg(0) := new_out_exp
+      E_reg(0) := E
+      D_reg(0) := D
+      //
+      adder_io_out_s_reg(0) := adder.io.out_s
+      adder_io_out_c_reg(0) := adder.io.out_c
+      //
+      adder_result_reg(0) := adder_result
+      //
+      leadingOne_reg(0) := leadingOne
+      //
+      subber2_out_s_reg(0) := subber2.io.out_s
+      subber2_out_c_reg(0) := subber2.io.out_c
+
+      for(i <- 1 until 11 ){
+        if(i < 11){
+          sign_reg(i) := sign_reg(i-1)
+          io_in_a_reg(i) := io_in_a_reg(i-1)
+          io_in_b_reg(i) := io_in_b_reg(i-1)
+        }
+        if(i < 8){
+          ref_s_reg(i) := ref_s_reg(i-1)
+          ref_frac_reg(i) := ref_frac_reg(i-1)
+          ref_exp_reg(i) := ref_exp_reg(i-1)
+          sub_exp_reg(i) := sub_exp_reg(i-1)
+        }
+        if(i < 5){
+          E_reg(i) := E_reg(i-1)
+          D_reg(i) := D_reg(i-1)
+          new_s_reg(i) := new_s_reg(i-1)
+        }
+        if(i < 3){
+          adder_result_reg(i) := adder_result_reg(i-1)
+          adder_io_out_s_reg(i) := adder_io_out_s_reg(i-1)
+          exp_reg(i) := exp_reg(i-1)
+          frac_reg(i) := frac_reg(i-1)
+          wfrac_reg(i) := wfrac_reg(i-1)
+        }
+        if(i < 2){
+          subber_out_s_reg(i) := subber_out_s_reg(i-1)
+          subber_out_c_reg(i) := subber_out_c_reg(i-1)
+          leadingOne_reg(i) := leadingOne_reg(i-1)
+          wire_temp_add_in_reg(i) := wire_temp_add_in_reg(i-1)
+        }
+      }
+    }
+    val reg_out_s = RegInit(0.U(bw.W))
+    io.out_s := reg_out_s
+    when(io.in_en) {
+      when(io_in_a_reg(10)(bw - 2, 0) === 0.U && io_in_b_reg(10)(bw - 2, 0) === 0.U) {
+        new_s_reg(5) := 0.U
+        new_out_exp_reg(0) := 0.U
+        new_out_frac_reg(0) := 0.U
+      }.elsewhen(sub_exp_reg(7) >= mantissa.U) { // if the difference between the exponents is too large, larger than mantissa size.
+        new_s_reg(5) := ref_s_reg(7)
+        new_out_frac_reg(0) := ref_frac_reg(7)
+        new_out_exp_reg(0) := ref_exp_reg(7)
+      }.elsewhen(E_reg(4) === 1.U) { // if the exponent should stay the same size as the largest exponent
+        new_s_reg(5) := new_s_reg(4)
+        new_out_exp_reg(0) := ref_exp_reg(7)
+        new_out_frac_reg(0) := adder_result_reg(2)(mantissa - 1, 0)
+      }.elsewhen(D_reg(4) === 0.U) { // if exponent needs to be increased by 1
+        new_s_reg(5) := new_s_reg(4)
+        when(ref_exp_reg(7) === BigInt(2).pow(exponent).U - 2.U) { // accounting for overflows
+          new_out_exp_reg(0) := BigInt(2).pow(exponent).U - 2.U
+          new_out_frac_reg(0) := BigInt(2).pow(mantissa).U - 1.U
+        }.otherwise {
+          new_out_exp_reg(0) := ref_exp_reg(7) + 1.U
+          new_out_frac_reg(0) := adder_result_reg(2)(mantissa, 1)
+        }
+      }.elsewhen(D_reg(4) === 1.U) { // if exponent needs to be decreased by 1 or more
+        new_s_reg(5) := new_s_reg(4)
+        when(leadingOne_reg(1) === 1.U && adder_result_reg(2) === 0.U && ((1.U === (sign_reg(10)(0) ^ sign_reg(10)(1)) && io_in_a_reg(10)(bw - 2, 0) === io_in_b_reg(10)(bw - 2, 0)))) {
+          new_out_exp_reg(0) := 0.U
+          new_out_frac_reg(0) := 0.U
+        }.otherwise {
+          when(subber2_out_c_reg(0) === 1.U) { // accounting for underflows
+            new_out_exp_reg(0) := 1.U(exponent.W)
+            new_out_frac_reg(0) := 0.U
+          }.otherwise {
+            new_out_exp_reg(0) := subber2_out_s_reg(0)
+            new_out_frac_reg(0) := adder_result_reg(2)(mantissa - 1, 0) << ((mantissa + 1).U - leadingOne_reg(1))
+          }
+        }
+      }
+      reg_out_s := new_s_reg(5) ## new_out_exp_reg(0) ## new_out_frac_reg(0)
+    }
+
+  }
+
+  // 13 cycle subtractor
+  class FP_subtractor_13ccs(bw: Int) extends Module {
+    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+    val io = IO(new Bundle() {
+      val in_en = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val in_b = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+    })
+    // the subtraction is just a special case of the adder
+    val FP_adder = Module(new FP_adder_13ccs(bw))
+    val adjusted_in_b = WireInit(0.U(bw.W))
+    // the second input needs to have its sign bit inverted for using the adder for subtraction
+    adjusted_in_b := (~io.in_b(bw - 1)) ## io.in_b(bw - 2, 0)
+    FP_adder.io.in_en := io.in_en
+    FP_adder.io.in_a := io.in_a
+    FP_adder.io.in_b := adjusted_in_b
+    io.out_s := FP_adder.io.out_s
+  }
+
+  // 10 cycle multiplier
+  class FP_multiplier_10ccs(bw: Int) extends Module {
+    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+    val io = IO(new Bundle() {
+      val in_en = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val in_b = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+    })
+    var exponent = 0
+    var mantissa = 0
+
+    if (bw == 16) {
+      exponent = 5
+      mantissa = 10
+    } else if (bw == 32) {
+      exponent = 8
+      mantissa = 23
+    } else if (bw == 64) {
+      exponent = 11
+      mantissa = 52
+    } else if (bw == 128) {
+      exponent = 15
+      mantissa = 112
+    }
+    // get the sign bit of the two inptus
+    val s = Wire(Vec(2, UInt(1.W)))
+    s(0) := io.in_a(bw - 1)
+    s(1) := io.in_b(bw - 1)
+
+    // get the exponents of the two inputs
+    val exp = Wire(Vec(2, UInt(exponent.W)))
+    when(io.in_a(bw - 2, mantissa) > BigInt(2).pow(exponent).U - 2.U) {
+      exp(0) := BigInt(2).pow(exponent).U - 2.U
+    }.elsewhen(io.in_a(bw-2,mantissa) < 1.U){
+      exp(0) := 1.U
+    }.otherwise {
+      exp(0) := io.in_a(bw - 2, mantissa)
+    }
+    when(io.in_b(bw - 2, mantissa) > BigInt(2).pow(exponent).U - 2.U) {
+      exp(1) := BigInt(2).pow(exponent).U - 2.U
+    }.elsewhen(io.in_b(bw-2,mantissa) < 1.U){
+      exp(1) := 1.U
+    }.otherwise {
+      exp(1) := io.in_b(bw - 2, mantissa)
+    }
+
+    // get the mantissa parts of the two inputs
+    val frac = Wire(Vec(2, UInt(mantissa.W)))
+    frac(0) := io.in_a(mantissa - 1, 0)
+    frac(1) := io.in_b(mantissa - 1, 0)
+
+    // 1.0 + mantissa part of the two numbers
+    val new_frac = Wire(Vec(2, UInt((mantissa + 1).W)))
+    new_frac(0) := 1.U ## frac(0)
+    new_frac(1) := 1.U ## frac(1)
+
+    val s_reg = RegInit(VecInit.fill(5)(VecInit.fill(2)(0.U(1.W))))
+    val exp_reg = RegInit(VecInit.fill(9)(VecInit.fill(2)(0.U(exponent.W))))
+    val new_frac_reg = RegInit(VecInit.fill(2)(VecInit.fill(2)(0.U((mantissa+1).W))))
+
+    val multiplier = Module(new multiplier(mantissa + 1))
+    multiplier.io.in_a := new_frac_reg(1)(0)
+    multiplier.io.in_b := new_frac_reg(1)(1)
+
+    val multipplier_out_s_reg = RegInit(VecInit.fill(6)(0.U(((mantissa+1)*2).W)))
+
+    // subtract exponent value of the second input from the bias value
+    val subber = Module(new full_subber(exponent))
+    subber.io.in_a := (BigInt(2).pow(exponent - 1) - 1).U // the bias
+    subber.io.in_b := exp_reg(2)(1) // the second input
+    subber.io.in_c := 0.U
+
+    val subber_out_s_reg = RegInit(VecInit.fill(1)(0.U(exponent.W)))
+    val subber_out_c_reg = RegInit(VecInit.fill(1)(0.U(1.W)))
+
+    // will take twoscomplement of subtraction result
+    val complementN = Module(new twoscomplement(exponent))
+    complementN.io.in := subber_out_s_reg(0)
+
+    val complementN_out_reg = RegInit(VecInit.fill(3)(0.U(exponent.W)))
+
+    val new_s = Wire(UInt(1.W))
+    new_s := s_reg(4)(0) ^ s_reg(4)(1)
+
+    val new_s_reg = RegInit(VecInit.fill(4)(0.U(1.W)))
+
+    val is_exp1_neg_wire = Wire(Bool())
+    is_exp1_neg_wire :=  exp_reg(5)(1) < (BigInt(2).pow(exponent-1) - 1).U
+
+    val is_exp1_neg_reg = RegInit(VecInit.fill(2)(false.B))
+
+
+    // will add the twoscomplement result to the first input exponent
+    val adderN = Module(new full_adder(exponent))
+    adderN.io.in_c := 0.U
+
+    when(multipplier_out_s_reg(4)(((mantissa + 1) * 2) - 1) === 1.U) {
+      adderN.io.in_a := exp_reg(6)(0) + 1.U
+      adderN.io.in_b := complementN_out_reg(2)
+    }.otherwise {
+      adderN.io.in_a := exp_reg(6)(0)
+      adderN.io.in_b := complementN_out_reg(2)
+    }
+
+    val adderN_out_s_reg = RegInit(VecInit.fill(1)(0.U(exponent.W)))
+    val adderN_out_c_reg = RegInit(VecInit.fill(1)(0.U(1.W)))
+
+    val new_exp_reg = RegInit(VecInit.fill(1)(0.U(exponent.W)))
+    val new_mant_reg = RegInit(VecInit.fill(1)(0.U(mantissa.W)))
+
+    val reg_out_s = RegInit(0.U(bw.W))
+
+    when(io.in_en){
+      when(multipplier_out_s_reg(5)(((mantissa + 1) * 2) - 1) === 1.U) {
+        new_exp_reg(0) := Mux(is_exp1_neg_reg(1), Mux(!adderN_out_c_reg(0).asBool, 1.U, adderN_out_s_reg(0)), Mux(adderN_out_c_reg(0).asBool || adderN_out_s_reg(0) > (BigInt(2).pow(exponent) - 2).U, (BigInt(2).pow(exponent) - 2).U, adderN_out_s_reg(0)))
+        new_mant_reg(0) := Mux(is_exp1_neg_reg(1), Mux(!adderN_out_c_reg(0).asBool, 0.U, multipplier_out_s_reg(5)(((mantissa + 1) * 2) - 2, mantissa + 1)), Mux(adderN_out_c_reg(0).asBool || adderN_out_s_reg(0) > (BigInt(2).pow(exponent) - 2).U, (BigInt(2).pow(mantissa) - 1).U, multipplier_out_s_reg(5)(((mantissa + 1) * 2) - 2, mantissa + 1)))
+      }.otherwise {
+        new_exp_reg(0) := Mux(is_exp1_neg_reg(1), Mux(!adderN_out_c_reg(0).asBool, 1.U, adderN_out_s_reg(0)), Mux(adderN_out_c_reg(0).asBool || adderN_out_s_reg(0) > (BigInt(2).pow(exponent) - 2).U, (BigInt(2).pow(exponent) - 2).U, adderN_out_s_reg(0)))
+        new_mant_reg(0) := Mux(is_exp1_neg_reg(1), Mux(!adderN_out_c_reg(0).asBool, 0.U, multipplier_out_s_reg(5)(((mantissa + 1) * 2) - 3, mantissa)), Mux(adderN_out_c_reg(0).asBool || adderN_out_s_reg(0) > (BigInt(2).pow(exponent) - 2).U, (BigInt(2).pow(mantissa) - 1).U, multipplier_out_s_reg(5)(((mantissa + 1) * 2) - 3, mantissa)))
+      }
+
+      s_reg(0) := s
+      exp_reg(0) := exp
+      new_frac_reg(0) := new_frac
+      multipplier_out_s_reg(0) := multiplier.io.out_s
+      subber_out_s_reg(0) := subber.io.out_s
+      subber_out_c_reg(0) := subber.io.out_c
+      complementN_out_reg(0) := complementN.io.out
+      new_s_reg(0) := new_s
+      is_exp1_neg_reg(0) := is_exp1_neg_wire
+      adderN_out_s_reg(0) := adderN.io.out_s
+      adderN_out_c_reg(0) := adderN.io.out_c
+
+      for(i <- 1 until 9){
+        exp_reg(i) := exp_reg(i-1)
+        if(i < 6){
+          multipplier_out_s_reg(i) := multipplier_out_s_reg(i-1)
+          if(i < 5){
+            s_reg(i) := s_reg(i-1)
+            if(i < 4){
+              new_s_reg(i) := new_s_reg(i-1)
+              if(i < 3){
+                complementN_out_reg(i) := complementN_out_reg(i-1)
+                if(i <2){
+                  new_frac_reg(i) := new_frac_reg(i-1)
+                  is_exp1_neg_reg(i) := is_exp1_neg_reg(i-1)
+                }
+              }
+            }
+          }
+        }
+      }
+
+      when(exp_reg(8)(0) === 0.U || exp_reg(8)(1) === 0.U) {
+        reg_out_s := 0.U
+      }.otherwise {
+        reg_out_s := new_s_reg(3) ## new_exp_reg(0) ## new_mant_reg(0)
+      }
+    }
+    io.out_s := reg_out_s
+  }
+
+
+  class FP_square_root_newfpu(bw: Int, NR_iter: Int) extends Module {
+    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+    val io = IO(new Bundle() {
+      val in_en = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+    })
+    var magic = scala.BigInt("0", 10)
+    var exponent = 0
+    var mantissa = 0
+    var limit = scala.BigInt("0", 10)
+    if (bw == 16) {
+      exponent = 5
+      mantissa = 10
+      magic = scala.BigInt("23040", 10)
+    } else if (bw == 32) {
+      exponent = 8
+      mantissa = 23
+      magic = scala.BigInt("1597463007", 10)
+    } else if (bw == 64) {
+      exponent = 11
+      mantissa = 52
+      magic = scala.BigInt("6910469410427058089", 10)
+    } else if (bw == 128) {
+      exponent = 15
+      mantissa = 112
+      magic = scala.BigInt("127598099150064121557322682042419249152", 10)
+    }
+    limit = (magic * 2) / 3
+
+    val number = Wire(UInt((bw).W))
+    val threehalfs = Wire(UInt(bw.W))
+    threehalfs := convert_string_to_IEEE_754("1.5", bw).U
+    when(io.in_a(bw - 2, 0) > (limit * 2).U) {
+      number := limit.U
+    }.otherwise {
+      number := io.in_a(bw - 2, 0) >> 1.U
+    }
+
+    // get the magic number
+    val magic_num = magic.U((bw).W) // we are performing a fast inverse square root. Get the magic number
+
+    val result = Wire(UInt(bw.W)) // subtract the adjusted input from the magic number and we have the inverse square root immediately (although an approximation)
+    result := magic_num - number // the appoximation is obtained immediateley
+
+    val x_n = RegInit(VecInit.fill(NR_iter*4)(0.U(bw.W)))
+    val a_2 = RegInit(VecInit.fill(NR_iter*4)(0.U(bw.W)))
+    val stage1_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+    val stage2_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+    val stage3_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(12)(0.U(bw.W)))))
+    val stage4_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+
+    val multipliers = Vector.fill(NR_iter)(Vector.fill(3)(Module(new FP_multiplier_10ccs(bw)).io))
+    val subtractors = Vector.fill(NR_iter)(Module(new FP_subtractor_13ccs(bw)).io)
+    multipliers.map(x=>x.map(x=>x.in_en := io.in_en))
+    subtractors.map(x=>x.in_en := io.in_en)
+    for(i <- 0 until NR_iter){
+      when(io.in_en) {
+        for (j <- 1 until 12) {
+          stage3_regs(i)(0)(j) := stage3_regs(i)(0)(j - 1)
+          stage3_regs(i)(1)(j) := stage3_regs(i)(1)(j - 1)
+          if (j < 9) {
+            stage1_regs(i)(0)(j) := stage1_regs(i)(0)(j - 1)
+            stage1_regs(i)(1)(j) := stage1_regs(i)(1)(j - 1)
+            stage2_regs(i)(0)(j) := stage2_regs(i)(0)(j - 1)
+            stage2_regs(i)(1)(j) := stage2_regs(i)(1)(j - 1)
+            stage4_regs(i)(1)(j) := stage4_regs(i)(1)(j - 1)
+          }
+        }
+      }
+      for(j <- 0 until 4){
+        if(j == 0){
+          if(i == 0) {
+            when(io.in_en) {
+              x_n(i * 4) := result
+              a_2(i * 4) := io.in_a(bw - 1) ## (io.in_a(bw - 2, mantissa) - 1.U) ## io.in_a(mantissa - 1, 0)
+              stage1_regs(0)(0)(0) := x_n(0)
+              stage1_regs(0)(1)(0) := a_2(0)
+            }
+            multipliers(0)(0).in_a := 0.U(1.W) ## result(bw - 2, 0)
+            multipliers(0)(0).in_b := 0.U(1.W) ## result(bw - 2, 0)
+          }else{
+            when(io.in_en) {
+              x_n(i * 4) := multipliers(i - 1)(2).out_s
+              a_2(i * 4) := stage4_regs(i - 1)(1)(8)
+              stage1_regs(i)(0)(0) := x_n(i * 4)
+              stage1_regs(i)(1)(0) := a_2(i * 4)
+            }
+            multipliers(i)(0).in_a := 0.U(1.W) ## multipliers(i-1)(2).out_s(bw - 2, 0)
+            multipliers(i)(0).in_b := 0.U(1.W) ## multipliers(i-1)(2).out_s(bw - 2, 0)
+          }
+        }else if(j == 1){
+          multipliers(i)(1).in_a := multipliers(i)(0).out_s
+          multipliers(i)(1).in_b := 0.U(1.W) ## stage1_regs(i)(1)(8)(bw-2,0)
+          when(io.in_en) {
+            a_2(i * 4 + 1) := stage1_regs(i)(1)(8)
+            x_n(i * 4 + 1) := stage1_regs(i)(0)(8)
+            stage2_regs(i)(0)(0) := x_n(i * 4 + 1)
+            stage2_regs(i)(1)(0) := a_2(i * 4 + 1)
+          }
+        }else if(j == 2){
+          subtractors(i).in_a := threehalfs
+          subtractors(i).in_b := multipliers(i)(1).out_s
+          when(io.in_en) {
+            a_2(i * 4 + 2) := stage2_regs(i)(1)(8)
+            x_n(i * 4 + 2) := stage2_regs(i)(0)(8)
+            stage3_regs(i)(0)(0) := x_n(i * 4 + 2)
+            stage3_regs(i)(1)(0) := a_2(i * 4 + 2)
+          }
+        }else if(j == 3){
+          multipliers(i)(2).in_a := 0.U(1.W) ## stage3_regs(i)(0)(11)(bw-2,0)
+          multipliers(i)(2).in_b := subtractors(i).out_s
+          when(io.in_en) {
+            a_2(i * 4 + 3) := stage3_regs(i)(1)(11)
+            stage4_regs(i)(1)(0) := a_2(i * 4 + 3)
+          }
+        }
+      }
+    }
+    val restore_a = Wire(UInt(bw.W))
+    restore_a := stage4_regs(NR_iter-1)(1)(8)(bw - 1) ## (stage4_regs(NR_iter-1)(1)(8)(bw - 2, mantissa) + 1.U) ## stage4_regs(NR_iter-1)(1)(8)(mantissa - 1, 0)
+    val multiplier4 = Module(new FP_multiplier_10ccs(bw))
+    multiplier4.io.in_en := io.in_en
+    multiplier4.io.in_a := 0.U(1.W) ## multipliers(NR_iter-1)(2).out_s(bw - 2, 0)
+    multiplier4.io.in_b := restore_a
+    io.out_s := multiplier4.io.out_s(bw - 2, 0)
+  }
+
+  class FP_reciprocal_newfpu(bw: Int, NR_iter: Int) extends Module {
+    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+    val io = IO(new Bundle() {
+      val in_en = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+    })
+    var magic = scala.BigInt("0", 10)
+    var exponent = 0
+    var mantissa = 0
+    var limit = scala.BigInt("0", 10)
+    if (bw == 16) {
+      exponent = 5
+      mantissa = 10
+      magic = scala.BigInt("23040", 10)
+    } else if (bw == 32) {
+      exponent = 8
+      mantissa = 23
+      magic = scala.BigInt("1597463007", 10)
+    } else if (bw == 64) {
+      exponent = 11
+      mantissa = 52
+      magic = scala.BigInt("6910469410427058089", 10)
+    } else if (bw == 128) {
+      exponent = 15
+      mantissa = 112
+      magic = scala.BigInt("127598099150064121557322682042419249152", 10)
+    }
+    limit = (magic * 2) / 3
+
+    val number = Wire(UInt((bw).W))
+    val threehalfs = Wire(UInt(bw.W))
+    threehalfs := convert_string_to_IEEE_754("1.5", bw).U
+    val two = Wire(UInt(bw.W))
+    two := convert_string_to_IEEE_754("2.0", bw).U
+    when(io.in_a(bw - 2, 0) > (limit * 2).U) {
+      number := limit.U
+    }.otherwise {
+      number := io.in_a(bw - 2, 0) >> 1.U
+    }
+
+    // get the magic number
+    val magic_num = magic.U((bw).W) // we are performing a fast inverse square root. Get the magic number
+
+    val result = Wire(UInt(bw.W)) // subtract the adjusted input from the magic number and we have the inverse square root immediately (although an approximation)
+    result := magic_num - number // the appoximation is obtained immediateley
+
+    val x_n = RegInit(VecInit.fill(NR_iter*4)(0.U(bw.W)))
+    val a_2 = RegInit(VecInit.fill(NR_iter*4)(0.U(bw.W)))
+    val stage1_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+    val stage2_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+    val stage3_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(12)(0.U(bw.W)))))
+    val stage4_regs = RegInit(VecInit.fill(NR_iter)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+    val multipliers = Vector.fill(NR_iter)(Vector.fill(3)(Module(new FP_multiplier_10ccs(bw)).io))
+    val subtractors = Vector.fill(NR_iter)(Module(new FP_subtractor_13ccs(bw)).io)
+    multipliers.map(x=>x.map(x=>x.in_en := io.in_en))
+    subtractors.map(x=>x.in_en := io.in_en)
+
+
+    for(i <- 0 until NR_iter){
+      when(io.in_en) {
+        for (j <- 1 until 12) {
+          stage3_regs(i)(0)(j) := stage3_regs(i)(0)(j - 1)
+          stage3_regs(i)(1)(j) := stage3_regs(i)(1)(j - 1)
+          if (j < 9) {
+            stage1_regs(i)(0)(j) := stage1_regs(i)(0)(j - 1)
+            stage1_regs(i)(1)(j) := stage1_regs(i)(1)(j - 1)
+            stage2_regs(i)(0)(j) := stage2_regs(i)(0)(j - 1)
+            stage2_regs(i)(1)(j) := stage2_regs(i)(1)(j - 1)
+            stage4_regs(i)(1)(j) := stage4_regs(i)(1)(j - 1)
+          }
+        }
+      }
+      for(j <- 0 until 4){
+        if(j == 0){
+          if(i == 0) {
+            when(io.in_en) {
+              x_n(i * 4) := result
+              a_2(i * 4) := io.in_a(bw - 1) ## (io.in_a(bw - 2, mantissa) - 1.U) ## io.in_a(mantissa - 1, 0)
+              stage1_regs(0)(0)(0) := x_n(0)
+              stage1_regs(0)(1)(0) := a_2(0)
+            }
+            multipliers(0)(0).in_a := 0.U(1.W) ## result(bw - 2, 0)
+            multipliers(0)(0).in_b := 0.U(1.W) ## result(bw - 2, 0)
+          }else{
+            when(io.in_en) {
+              x_n(i * 4) := multipliers(i - 1)(2).out_s
+              a_2(i * 4) := stage4_regs(i - 1)(1)(8)
+              stage1_regs(i)(0)(0) := x_n(i * 4)
+              stage1_regs(i)(1)(0) := a_2(i * 4)
+            }
+            multipliers(i)(0).in_a := 0.U(1.W) ## multipliers(i-1)(2).out_s(bw - 2, 0)
+            multipliers(i)(0).in_b := 0.U(1.W) ## multipliers(i-1)(2).out_s(bw - 2, 0)
+          }
+        }else if(j == 1){
+          multipliers(i)(1).in_a := multipliers(i)(0).out_s
+          multipliers(i)(1).in_b := 0.U(1.W) ## stage1_regs(i)(1)(8)(bw-2,0)
+          when(io.in_en) {
+            a_2(i * 4 + 1) := stage1_regs(i)(1)(8)
+            x_n(i * 4 + 1) := stage1_regs(i)(0)(8)
+            stage2_regs(i)(0)(0) := x_n(i * 4 + 1)
+            stage2_regs(i)(1)(0) := a_2(i * 4 + 1)
+          }
+        }else if(j == 2){
+          subtractors(i).in_a := threehalfs
+          subtractors(i).in_b := multipliers(i)(1).out_s
+          when(io.in_en) {
+            a_2(i * 4 + 2) := stage2_regs(i)(1)(8)
+            x_n(i * 4 + 2) := stage2_regs(i)(0)(8)
+            stage3_regs(i)(0)(0) := x_n(i * 4 + 2)
+            stage3_regs(i)(1)(0) := a_2(i * 4 + 2)
+          }
+        }else if(j == 3){
+          multipliers(i)(2).in_a := 0.U(1.W) ## stage3_regs(i)(0)(11)(bw-2,0)
+          multipliers(i)(2).in_b := subtractors(i).out_s
+          when(io.in_en) {
+            a_2(i * 4 + 3) := stage3_regs(i)(1)(11)
+            stage4_regs(i)(1)(0) := a_2(i * 4 + 3)
+          }
+        }
+      }
+    }
+
+    val a_2_isr_to_r = RegInit(0.U(bw.W))
+    val transition_regs = RegInit(VecInit.fill(9)(0.U(bw.W)))
+    when(io.in_en) {
+      a_2_isr_to_r := stage4_regs(NR_iter - 1)(1)(8)(bw - 1) ## (stage4_regs(NR_iter - 1)(1)(8)(bw - 2, mantissa) + 1.U) ## stage4_regs(NR_iter - 1)(1)(8)(mantissa - 1, 0)
+      transition_regs(0) := a_2_isr_to_r
+      for(i <- 1 until 9){
+        transition_regs(i) := transition_regs(i-1)
+      }
+    }
+
+    val multiplier4 = Module(new FP_multiplier_10ccs(bw)) // one cycle
+    multiplier4.io.in_en := io.in_en
+    multiplier4.io.in_a := 0.U(1.W) ## multipliers(NR_iter-1)(2).out_s(bw - 2, 0)
+    multiplier4.io.in_b := 0.U(1.W) ## multipliers(NR_iter-1)(2).out_s(bw - 2, 0)
+
+    val NR_iter_r = NR_iter + 1
+
+    val x_n_r = RegInit(VecInit.fill(NR_iter_r*3)(0.U(bw.W)))
+    val a_2_r = RegInit(VecInit.fill(NR_iter_r*3)(0.U(bw.W)))
+    val stage1_regs_r = RegInit(VecInit.fill(NR_iter_r)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+    val stage2_regs_r = RegInit(VecInit.fill(NR_iter_r)(VecInit.fill(2)(VecInit.fill(12)(0.U(bw.W)))))
+    val stage3_regs_r = RegInit(VecInit.fill(NR_iter_r)(VecInit.fill(2)(VecInit.fill(9)(0.U(bw.W)))))
+    val multipliers_r = Vector.fill(NR_iter_r)(Vector.fill(2)(Module(new FP_multiplier_10ccs(bw)).io))
+    val subtractors_r = Vector.fill(NR_iter_r)(Module(new FP_subtractor_13ccs(bw)).io)
+    multipliers_r.map(x=>x.map(x=>x.in_en := io.in_en))
+    subtractors_r.map(x=>x.in_en := io.in_en)
+
+    for(i <- 0 until NR_iter_r){
+      when(io.in_en) {
+        for (j <- 1 until 12) {
+          stage2_regs_r(i)(0)(j) := stage2_regs_r(i)(0)(j - 1)
+          stage2_regs_r(i)(1)(j) := stage2_regs_r(i)(1)(j - 1)
+          if (j < 9) {
+            stage1_regs_r(i)(0)(j) := stage1_regs_r(i)(0)(j - 1)
+            stage1_regs_r(i)(1)(j) := stage1_regs_r(i)(1)(j - 1)
+            stage3_regs_r(i)(1)(j) := stage3_regs_r(i)(1)(j - 1)
+          }
+        }
+      }
+      for(j <- 0 until 3){
+        if(j == 0){
+          if(i == 0) {
+            when(io.in_en) {
+              x_n_r(i * 3) := multiplier4.io.out_s
+              a_2_r(i * 3) := transition_regs(8)
+              stage1_regs_r(i)(0)(0) := x_n_r(0)
+              stage1_regs_r(i)(1)(0) := a_2_r(0)
+            }
+            multipliers_r(0)(0).in_a := 0.U(1.W) ## multiplier4.io.out_s(bw-2,0)
+            multipliers_r(0)(0).in_b := 0.U(1.W) ## transition_regs(8)(bw-2,0)
+          }else{
+            when(io.in_en) {
+              x_n_r(i * 3) := multipliers_r(i - 1)(1).out_s
+              a_2_r(i * 3) := stage3_regs_r(i - 1)(1)(8)
+              stage1_regs_r(i)(0)(0) := x_n_r(i * 3)
+              stage1_regs_r(i)(1)(0) := a_2_r(i * 3)
+            }
+            multipliers_r(i)(0).in_a := 0.U(1.W) ## multipliers_r(i-1)(1).out_s(bw - 2, 0)
+            multipliers_r(i)(0).in_b := 0.U(1.W) ## stage3_regs_r(i-1)(1)(8)(bw - 2, 0)
+          }
+        }else if(j == 1){
+          subtractors_r(i).in_a := two
+          subtractors_r(i).in_b := multipliers_r(i)(0).out_s
+          when(io.in_en) {
+            a_2_r(i * 3 + 1) := stage1_regs_r(i)(1)(8)
+            x_n_r(i * 3 + 1) := stage1_regs_r(i)(0)(8)
+            stage2_regs_r(i)(0)(0) := x_n_r(i * 3 + 1)
+            stage2_regs_r(i)(1)(0) := a_2_r(i * 3 + 1)
+          }
+        }else if(j == 2){
+          multipliers_r(i)(1).in_a := 0.U(1.W) ## stage2_regs_r(i)(0)(11)(bw-2,0)
+          multipliers_r(i)(1).in_b := subtractors_r(i).out_s
+          when(io.in_en) {
+            a_2_r(i * 3 + 2) := stage2_regs_r(i)(1)(11)
+            stage3_regs_r(i)(1)(0) := a_2_r(i * 3 + 2)
+          }
+        }
+      }
+    }
+    io.out_s := stage3_regs_r(NR_iter_r-1)(1)(8)(bw - 1) ## multipliers_r(NR_iter_r-1)(1).out_s(bw - 2, 0) // total 9 cycles
+
+  }
+
+  class FP_divider_newfpu(bw:Int, NR_iter: Int) extends Module{
+    val io = IO(new Bundle{
+      val in_en = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val in_b = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+    })
+    val regs = RegInit(VecInit.fill(NR_iter*76 + 43)(0.U(bw.W)))
+    regs(0) := io.in_a
+    for(i <- 1 until NR_iter*76+43){
+      regs(i) := regs(i-1)
+    }
+    val reciprocal = Module(new FP_reciprocal_newfpu(bw, NR_iter)).io
+    reciprocal.in_en := io.in_en
+    reciprocal.in_a := io.in_b
+    val multiplier = Module(new FP_multiplier_10ccs(bw)).io
+    multiplier.in_en := io.in_en
+    multiplier.in_a := regs(NR_iter*76+42)
+    multiplier.in_b := reciprocal.out_s
+    io.out_s := multiplier.out_s
+  }
+
+
+  class FP_DOT_newfpu(n: Int, bw: Int) extends Module {
+    val io = IO(new Bundle{
+      val in_en = Input(Bool())
+      val in_a = Input(Vec(n, UInt(bw.W)))
+      val in_b = Input(Vec(n, UInt(bw.W)))
+      val out_s = Output(UInt(bw.W))
+    })
+    var temp_n = n
+    val add_per_layer = mutable.ArrayBuffer[Int]()
+    val regs_per_layer = mutable.ArrayBuffer[Int]()
+    while(temp_n>1){
+      if(temp_n % 2 == 1){
+        add_per_layer += temp_n/2
+        temp_n /= 2
+        temp_n += 1
+        regs_per_layer += 1
+      }else{
+        add_per_layer += temp_n/2
+        temp_n /= 2
+        regs_per_layer += 0
+      }
+    }
+    val multipliers = Vector.fill(n)(Module(new FP_multiplier_10ccs(bw)).io)
+    multipliers.map(x=>x.in_en := io.in_en)
+    multipliers.zipWithIndex.map(x=>x._1.in_a := io.in_a(x._2))
+    multipliers.zipWithIndex.map(x=>x._1.in_b := io.in_b(x._2))
+    if(add_per_layer.nonEmpty) {
+      val regs_and_adds = for (i <- 0 until add_per_layer.length) yield {
+        val adds = for (j <- 0 until add_per_layer(i)) yield {
+          Module(new FP_adder_13ccs(bw)).io
+        }
+        val regs = for (j <- 0 until regs_per_layer(i)) yield {
+          //RegInit(0.U.asTypeOf(new ComplexNum(bw)))
+          Module(new FPReg(13, bw)).io
+        }
+        (adds, regs)
+      }
+      for (i <- 0 until regs_and_adds.length) {
+        for (j <- 0 until add_per_layer(i) * 2 by 2) {
+          val temp = if (i == 0) {
+            multipliers(j).out_s
+          } else {
+            regs_and_adds(i - 1)._1(j).out_s
+          }
+          val temp2 = if (i == 0) {
+            multipliers(j + 1).out_s
+          } else {
+            if (j / 2 == add_per_layer(i) - 1) {
+              if (regs_per_layer(i - 1) == 1 && add_per_layer(i - 1) % 2 == 1) {
+                regs_and_adds(i - 1)._2(0).out
+              } else {
+                regs_and_adds(i - 1)._1(j + 1).out_s
+              }
+            } else {
+              regs_and_adds(i - 1)._1(j + 1).out_s
+            }
+          }
+          regs_and_adds(i)._1(j / 2).in_en := io.in_en
+          regs_and_adds(i)._1(j / 2).in_a := temp
+          regs_and_adds(i)._1(j / 2).in_b := temp2
+        }
+        for (j <- 0 until regs_per_layer(i)) {
+          val temp = if (i == 0) {
+            multipliers(add_per_layer(i) * 2).out_s
+          } else {
+            if (regs_per_layer(i - 1) == 1) {
+              regs_and_adds(i - 1)._2(0).out
+            } else {
+              regs_and_adds(i - 1)._1(add_per_layer(i) * 2).out_s
+            }
+          }
+          regs_and_adds(i)._2(j).in_en := io.in_en
+          regs_and_adds(i)._2(j).in := temp
+        }
+      }
+      println(s"addper layer: ${add_per_layer}")
+      io.out_s := regs_and_adds(add_per_layer.length - 1)._1(0).out_s
+    }else{
+      io.out_s := multipliers(0).out_s
+    }
+  }
+
+  class FPReg(depth: Int,bw: Int) extends Module{
+    val io = IO(new Bundle() {
+      val in = Input(UInt(bw.W))
+      val in_en = Input(Bool())
+      val out = Output(UInt(bw.W))
+    })
+    val reg = RegInit(VecInit.fill(depth)(0.U(bw.W)))
+    //    val reg = RegInit(0.U.asTypeOf(new ComplexNum(bw)))
+    when(io.in_en){
+      reg(0) := io.in
+      for(i <- 1 until depth){
+        reg(i) := reg(i-1)
+      }
+    }
+    io.out := reg(depth - 1)
+  }
+
+
+  def main(args: Array[String]) : Unit = {
+//    val sw = new PrintWriter("FP_divider_129ccs.v")
+//    sw.println(getVerilogString(new FP_DOT_newfpu(32, 1)))
+//    sw.close()
+    println("Testing the square root")
+    test(new FP_square_root_newfpu(32, 3)){c=>
+      c.io.in_en.poke(true.B)
+//      c.io.in_a.poke(convert_string_to_IEEE_754("12.25", 32).U)
+      for(i <- 0 until 3*43 + 10 + 100){
+        c.io.in_a.poke(convert_string_to_IEEE_754((i+1).toDouble.toString, 32).U)
+        c.clock.step()
+        println(s"Clock Cycle ${i+1}")
+        println(s"Square Root Output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+      }
+    }
+    println("testing the reciprocal")
+    test(new FP_reciprocal_newfpu(32, 1)){c=>
+      c.io.in_en.poke(true.B)
+//      c.io.in_a.poke(convert_string_to_IEEE_754("12.25", 32).U)
+      for(i<-0 until 1 * 43 + 10 + 2*33 + 100){
+        c.io.in_a.poke(convert_string_to_IEEE_754((i+1).toDouble.toString, 32).U)
+        c.clock.step()
+        println(s"Clock Cycle ${i+1}")
+        println(s"recip output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+      }
+    }
+    println(s"Testing out the new divider")
+    test(new FP_divider_newfpu(32,1)){c=>
+      c.io.in_en.poke(true.B)
+      c.io.in_a.poke(convert_string_to_IEEE_754("16.68", 32).U)
+      c.io.in_b.poke(convert_string_to_IEEE_754("3.55", 32).U)
+      for(i <- 0 until 1*43 + 2 * 33 + 10 + 10){
+        c.clock.step()
+        println(s"clock cycle: ${i+1}")
+        println(s"divider output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+      }
+    }
+    println(s"Testing out the dot prod")
+    val n = 2
+    test(new FP_DOT_newfpu(n, 32)){c=>
+      c.io.in_en.poke(true.B)
+      for(i <- 0 until 100){
+        for(j <- 0 until n){
+          c.io.in_a(j).poke(convert_string_to_IEEE_754("2.5", 32).U)
+          c.io.in_b(j).poke(convert_string_to_IEEE_754("4.5", 32).U)
+        }
+        c.clock.step()
+        println(s"CLock CYcle : ${i+1}")
+        println(s"Dot out : ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+      }
+    }
   }
 
 
