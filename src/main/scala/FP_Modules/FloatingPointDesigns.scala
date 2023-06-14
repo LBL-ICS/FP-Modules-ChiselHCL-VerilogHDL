@@ -2378,18 +2378,13 @@ object FloatingPointDesigns {
       val adder = Module(new FP_adder(bw)).io
       adder
     }
-
+    val reg_array_h = RegInit(VecInit.fill(level)(0.U(bw.W)))
     for(i <- 0 until level){
       multiply_layer(i).in_a := io.in_a
       multiply_layer(i).in_b := io.in_b(i)
-    }
-    for(i <- 0 until level){
+      reg_array_h(i) := io.in_c(i)
       adder_layer(i).in_a :=  multiply_layer(i).out_s
-      adder_layer(i).in_b := io.in_c(i)
-    }
-
-
-    for(i <- 0 until level){
+      adder_layer(i).in_b := reg_array_h(i)
       io.out_s(i) := adder_layer(i).out_s
     }
   }
@@ -2399,7 +2394,7 @@ object FloatingPointDesigns {
         sw.println(getVerilogString(new FP_DDOT(32, 32)))
         sw.close()
     val sw2 = new PrintWriter("axpy.v")
-        sw2.println(getVerilogString(new axpy(32, 32)))
+        sw2.println(getVerilogString(new axpy(32, 256)))
         sw2.close()
 //    println("Testing the square root")
 //    test(new FP_square_root_newfpu(32, 3)){c=>
