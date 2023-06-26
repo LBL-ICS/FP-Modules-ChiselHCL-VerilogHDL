@@ -2389,13 +2389,157 @@ object FloatingPointDesigns {
     }
   }
 
+  class FP_DDOT_dp(n: Int, bw: Int) extends Module {
+    val io = IO(new Bundle{
+      val in_a = Input(Vec(n, UInt(bw.W)))
+      val in_b = Input(Vec(n, UInt(bw.W)))
+      val out_s = Output(UInt(bw.W))
+    })
+    var temp_n = n
+    val add_per_layer = mutable.ArrayBuffer[Int]()
+    val regs_per_layer = mutable.ArrayBuffer[Int]()
+    while(temp_n>1){
+      if(temp_n % 2 == 1){
+        add_per_layer += temp_n/2
+        temp_n /= 2
+        temp_n += 1
+        regs_per_layer += 1
+      }else{
+        add_per_layer += temp_n/2
+        temp_n /= 2
+        regs_per_layer += 0
+      }
+    }
+    val multipliers = Vector.fill(n)(Module(new FP_multiplier_10ccs(bw)).io)
+    //    multipliers.map(x=>x.in_en := io.in_en)
+    multipliers.zipWithIndex.map(x=>x._1.in_a := io.in_a(x._2))
+    multipliers.zipWithIndex.map(x=>x._1.in_b := io.in_b(x._2))
+    multipliers.map(_.in_en := true.B)
+    if(add_per_layer.nonEmpty) {
+      val regs_and_adds = for (i <- 0 until add_per_layer.length) yield {
+        val adds = for (j <- 0 until add_per_layer(i)) yield {
+          Module(new FP_adder_13ccs(bw)).io
+        }
+        adds.map(_.in_en := true.B)
+        val regs = for (j <- 0 until regs_per_layer(i)) yield {
+          //RegInit(0.U.asTypeOf(new ComplexNum(bw)))
+          Module(new FPReg(13, bw)).io
+        }
+        (adds, regs)
+      }
+      //      regs_and_adds(0)._1.map(_.in_en := true.B)
+      for (i <- 0 until regs_and_adds.length) {
+        for (j <- 0 until add_per_layer(i) * 2 by 2) {
+          val temp = if (i == 0) {
+            multipliers(j).out_s
+          } else {
+            regs_and_adds(i - 1)._1(j).out_s
+          }
+          val temp2 = if (i == 0) {
+            multipliers(j + 1).out_s
+          } else {
+            if (j / 2 == add_per_layer(i) - 1) {
+              if (regs_per_layer(i - 1) == 1 && add_per_layer(i - 1) % 2 == 1) {
+                regs_and_adds(i - 1)._2(0).out
+              } else {
+                regs_and_adds(i - 1)._1(j + 1).out_s
+              }
+            } else {
+              regs_and_adds(i - 1)._1(j + 1).out_s
+            }
+          }
+          //          regs_and_adds(i)._1(j / 2).in_en := io.in_en
+          regs_and_adds(i)._1(j / 2).in_a := temp
+          regs_and_adds(i)._1(j / 2).in_b := temp2
+        }
+        for (j <- 0 until regs_per_layer(i)) {
+          val temp = if (i == 0) {
+            multipliers(add_per_layer(i) * 2).out_s
+          } else {
+            if (regs_per_layer(i - 1) == 1) {
+              regs_and_adds(i - 1)._2(0).out
+            } else {
+              regs_and_adds(i - 1)._1(add_per_layer(i) * 2).out_s
+            }
+          }
+          //          regs_and_adds(i)._2(j).in_en := true.B
+          regs_and_adds(i)._2(j).in := temp
+        }
+      }
+      //      println(s"addper layer: ${add_per_layer}")
+      io.out_s := regs_and_adds(add_per_layer.length - 1)._1(0).out_s
+    }else{
+      io.out_s := multipliers(0).out_s
+    }
+  }
+
+  class axpy_dp(bw:Int,level:Int)extends Module {
+    val io = IO {
+      new Bundle() {
+        val in_a = Input(UInt(bw.W))
+        val in_b = Input(Vec((level), UInt(bw.W)))
+        val in_c = Input(Vec((level), UInt(bw.W)))
+        val out_s = Output(Vec((level), UInt(bw.W)))
+      }
+    }
+
+    val multiply_layer = for(i <- 0 until level)yield{
+      val multiply = Module(new FP_multiplier_10ccs(bw)).io
+      multiply.in_en := true.B
+      multiply
+    }
+    val adder_layer = for (i <- 0 until level) yield {
+      val adder = Module(new FP_adder_13ccs(bw)).io
+      adder.in_en := true.B
+      adder
+    }
+    val reg_array_h = Vector.fill(level)(Module(new FPReg(10, 32)).io)
+    for(i <- 0 until level){
+      multiply_layer(i).in_a := io.in_a
+      multiply_layer(i).in_b := io.in_b(i)
+      reg_array_h(i).in := io.in_c(i)
+      adder_layer(i).in_a :=  multiply_layer(i).out_s
+      adder_layer(i).in_b := reg_array_h(i).out
+      io.out_s(i) := adder_layer(i).out_s
+    }
+  }
+
   def main(args: Array[String]) : Unit = {
-    val sw = new PrintWriter("FP_DDOT.v")
-        sw.println(getVerilogString(new FP_DDOT(32, 32)))
+    val sw = new PrintWriter("FP_DDOT_dp.v")
+        sw.println(getVerilogString(new FP_DDOT_dp(32, 32)))
         sw.close()
     val sw2 = new PrintWriter("axpy.v")
-        sw2.println(getVerilogString(new axpy(32, 256)))
+        sw2.println(getVerilogString(new axpy_dp(32, 256)))
         sw2.close()
+
+//    test(new axpy_dp(32, 3)){c=>
+//      for(i <- 0 until 40){
+//        c.io.in_a.poke(convert_string_to_IEEE_754("2.0", 32).U)
+//        for(j <- 0 until 3){
+//          c.io.in_b(j).poke(convert_string_to_IEEE_754((j+1).toDouble.toString, 32).U)
+//          c.io.in_c(j).poke(convert_string_to_IEEE_754((j+1).toDouble.toString, 32).U)
+//        }
+//        c.clock.step()
+//        println(s"Clock Cycle: ${i+1}")
+//        for(j <- 0 until 3){
+//          println(s"Output(${j}): ${convert_IEEE754_to_Decimal(c.io.out_s(j).peek().litValue, 32)}")
+//        }
+//      }
+//    }
+//
+//    println(s"--------------------------------===\n\n\n")
+//
+//    test(new FP_DDOT_dp(3, 32)){c=>
+//      for(i <- 0 until 40){
+//        for(i <- 0 until 3){
+//          c.io.in_a(i).poke(convert_string_to_IEEE_754((i+1).toDouble.toString, 32).U)
+//          c.io.in_b(i).poke(convert_string_to_IEEE_754((i+1).toDouble.toString, 32).U)
+//        }
+//        c.clock.step()
+//        println(s"Clock Cycle: ${i+1}")
+//        println(s"Output: ${convert_IEEE754_to_Decimal(c.io.out_s.peek().litValue, 32)}")
+//      }
+//    }
 //    println("Testing the square root")
 //    test(new FP_square_root_newfpu(32, 3)){c=>
 //      c.io.in_en.poke(true.B)
