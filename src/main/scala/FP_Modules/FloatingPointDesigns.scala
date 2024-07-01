@@ -528,6 +528,51 @@ object FloatingPointDesigns {
     io.out_s := out_sign ## out_exp ## out_frac
   }
 
+
+  // digit recurrence based fp square root
+  class FP_sqrt_bwccs(bw: Int) extends Module {
+    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
+    val io = IO(new Bundle() {
+      val in_en = Input(Bool())
+      val in_valid = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+      val out_valid = Output(Bool())
+    })
+    override def desiredName = s"FP_sqrt_bw${bw}"
+    val (exponent, mantissa) = bw match {
+      case 16 => (5,10)
+      case 32 => (8,23)
+      case 64 => (11,52)
+      case 128 => (15,112)
+    }
+    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
+    val sign = io.in_a(bw - 1)
+    val exp = io.in_a(bw-2, mantissa) -& bias
+    val frac = 1.U(2.W) ## io.in_a(mantissa - 1, 0)
+
+    //    printf(p"sign: ${sign}\n")
+    //    printf(p"exp: ${exp}\n")
+    //    printf(p"frac: ${frac}\n")
+
+    val ref_exp = Mux(exp(exponent).asBool,((~exp(exponent-1,0)).asUInt + 1.U), exp(exponent-1,0))
+    val exp_new = Mux(ref_exp(0).asBool,(ref_exp - 1.U) >> 1, ref_exp >> 1).asUInt
+
+    val ref_frac = Mux(ref_exp(0).asBool, frac << 1, frac).asUInt
+
+    val fsqrt = Module(new frac_sqrt(mantissa)).io
+    fsqrt.in_en := io.in_en
+    fsqrt.in_valid := io.in_valid
+    fsqrt.in_a := ref_frac
+
+    val out_sign = ShiftRegister(sign, mantissa, io.in_en)
+    val out_exp = ShiftRegister(exp_new, mantissa, io.in_en) + bias
+    val out_frac = fsqrt.out_s
+
+    io.out_valid := fsqrt.out_valid
+    io.out_s := out_sign ## out_exp(exponent - 1, 0) ## out_frac
+  }
+
   // Low cycle multiplier (might need few more pipeline stages for optimal MOF)
   class FP_mult_2ccs(bw: Int) extends Module {
     require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
@@ -949,54 +994,6 @@ object FloatingPointDesigns {
 
 
 
-
-
-  // --------------------------------------  incomplete designs-------------------------------------------------------------
-
-  // digit recurrence based fp square root
-  // sqrt needs a "small" correction and it will be correct
-  class FP_sqrt_bwccs(bw: Int) extends Module {
-    require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
-    val io = IO(new Bundle() {
-      val in_en = Input(Bool())
-      val in_valid = Input(Bool())
-      val in_a = Input(UInt(bw.W))
-      val out_s = Output(UInt(bw.W))
-      val out_valid = Output(Bool())
-    })
-    override def desiredName = s"FP_sqrt_bw${bw}"
-    val (exponent, mantissa) = bw match {
-      case 16 => (5,10)
-      case 32 => (8,23)
-      case 64 => (11,52)
-      case 128 => (15,112)
-    }
-    val bias = (BigInt(2).pow(exponent - 1) - 1).U(exponent.W)
-    val sign = io.in_a(bw - 1)
-    val exp = io.in_a(bw-2, mantissa) -& bias
-    val frac = io.in_a(mantissa - 1, 0)
-
-    printf(p"sign: ${sign}\n")
-    printf(p"exp: ${exp}\n")
-    printf(p"frac: ${frac}\n")
-
-    val ref_exp = Mux(exp(exponent).asBool,((~exp(exponent-1,0)).asUInt + 1.U), exp(exponent-1,0))
-    val exp_new = Mux(ref_exp(0).asBool,(ref_exp - 1.U) >> 1, ref_exp >> 1).asUInt
-
-    val ref_frac = Mux(ref_exp(0).asBool, frac << 1, frac).asUInt
-
-    val fsqrt = Module(new frac_sqrt(mantissa)).io
-    fsqrt.in_en := io.in_en
-    fsqrt.in_valid := io.in_valid
-    fsqrt.in_a := ref_frac
-
-    val out_sign = ShiftRegister(sign, mantissa, io.in_en)
-    val out_exp = ShiftRegister(exp_new, mantissa, io.in_en) + bias
-    val out_frac = fsqrt.out_s
-
-    io.out_valid := fsqrt.out_valid
-    io.out_s := out_sign ## out_exp(exponent - 1, 0) ## out_frac
-  }
 
 
 

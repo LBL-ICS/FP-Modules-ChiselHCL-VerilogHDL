@@ -236,39 +236,39 @@ object BinaryDesigns {
     }
   }
 
-  // Sqrt specialized for fractional numbers (really useful for floating point normalized numbers)
+  // Sqrt specialized for 1.fractional numbers (really useful for floating point normalized numbers)
   class frac_sqrt(bw: Int) extends Module{
     val io = IO(new Bundle(){
       val in_en = Input(Bool())
-      val in_a = Input(UInt(bw.W))
+      val in_a = Input(UInt((bw+2).W))
       val in_valid = Input(Bool())
       val out_valid = Output(Bool())
       val out_s = Output(UInt(bw.W))
     })
-    val P = RegInit(VecInit.fill(bw-1)(0.U((bw*2).W)))
-    val X = RegInit(VecInit.fill(bw-1)(0.U((bw*2).W)))
+    val P = RegInit(VecInit.fill(bw-1)(0.U((bw*2+1).W)))
+    val X = RegInit(VecInit.fill(bw-1)(0.U((bw*2+2).W)))
     val one = 1.U(1.W) ## 0.U((bw*2).W)
-    val temp_res = Wire(Vec(bw,UInt((bw).W)))
-    val results = RegInit(VecInit.fill(bw)(0.U((bw).W)))
+    val temp_res = Wire(Vec(bw,UInt(bw.W)))
+    val results = RegInit(VecInit.fill(bw)(0.U(bw.W)))
     val shifted_sqrd_ones = Wire(Vec(bw, UInt((bw*2+1).W)))
     shifted_sqrd_ones.zipWithIndex.foreach(x=> x._1 := (one >> ((x._2 + 1)*2)))
     val shifted_ones = Wire(Vec(bw, UInt((bw*2+1).W)))
     shifted_ones.zipWithIndex.foreach(x=> x._1 := (one >> (x._2 + 1)))
-    val shifted_ps = Wire(Vec(bw-1, UInt((bw*2).W)))
+    val shifted_ps = Wire(Vec(bw-1, UInt((bw*2+1).W)))
     shifted_ps.zipWithIndex.foreach(x=>x._1 := (P(x._2) >> (x._2+1)))
     temp_res(0) := 0.U
     temp_res.slice(1,bw).zip(results.slice(0,bw-1)).foreach(x=>x._1 := x._2)
     io.out_valid := ShiftRegister(io.in_valid,bw,io.in_en)
     io.out_s := results.last
-    val in = io.in_a ## 0.U(bw.W)
+    val in = (io.in_a ## 0.U(bw.W)) - one
     //    printf(p"results: ${results}\n")
     when(io.in_en){
       for(i <- 0 until bw){
         if(i == 0){
           val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
-          val y = shifted_one
+          val y = shifted_one +& one
           val yleqx = y <= in
-          P(0) := Mux(yleqx, shifted_ones(i), 0.U)
+          P(0) := Mux(yleqx, shifted_ones(i) + one, one)
           X(0) := Mux(yleqx, in - y, in)
           val t = VecInit(temp_res(0).asBools)
           t(bw-1) := yleqx
@@ -276,10 +276,10 @@ object BinaryDesigns {
         }else{
           val shifted_one = shifted_sqrd_ones(i)((bw*2)-1,0)
           val shifted_P = shifted_ps(i-1)
-          val y = shifted_P + shifted_one
+          val y = shifted_P +& shifted_one
           val yleqx = y <= X(i-1)
           if(i != bw - 1) {
-            P(i) := Mux(yleqx, shifted_ones(i), P(i-1))
+            P(i) := Mux(yleqx, shifted_ones(i) + P(i-1), P(i-1))
             X(i) := Mux(yleqx, X(i-1) - y, X(i-1))
           }
           val t = VecInit(temp_res(i).asBools)
