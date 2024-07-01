@@ -236,6 +236,72 @@ object BinaryDesigns {
     }
   }
 
+  // special division focused on 1.fractional numbers (for floating point application specifically)
+  class frac_div(bw: Int) extends Module{
+    val io = IO(new Bundle(){
+      val in_ready = Input(Bool())
+      val in_valid = Input(Bool())
+      val in_reset = Input(Bool())
+      val in_a = Input(UInt(bw.W))
+      val in_b = Input(UInt(bw.W))
+      val out_s = Output(UInt(bw.W))
+      val out_r = Output(UInt(bw.W))
+      val out_valid = Output(Bool())
+    })
+    override def desiredName = s"divider_BW$bw"
+    //cc latency equal to bw
+    val a_aux_reg = RegInit(VecInit.fill(bw)(0.U((bw*2).W)))
+    val b_aux_reg = RegInit(VecInit.fill(bw)(0.U((bw*2).W)))
+    val init_res = Wire(UInt(bw.W))
+    init_res := 0.U
+    val wire_res = Wire(Vec(bw,UInt(bw.W)))
+    val result_reg = RegInit(VecInit.fill(bw)(0.U(bw.W)))
+    val sr_out_valid = RegInit(VecInit.fill(bw)(false.B))
+    wire_res := result_reg
+    io.out_valid := sr_out_valid.last
+    io.out_s := result_reg.last.asUInt
+    io.out_r  := a_aux_reg.last
+    val ina = io.in_a ## 0.U(bw.W)
+    val inb = io.in_b ## 0.U(bw.W)
+    when(io.in_ready){
+      when(io.in_reset){
+        a_aux_reg := VecInit.fill(bw)(0.U(bw.W))
+        b_aux_reg := VecInit.fill(bw)(0.U(bw.W))
+        result_reg := VecInit.fill(bw)(0.U(bw.W))
+        sr_out_valid := VecInit.fill(bw)(false.B)
+      }.otherwise {
+        sr_out_valid(0) := io.in_valid
+        for (i <- 0 until bw) {
+          if (i == 0) {
+            val t = VecInit(init_res.asBools)
+            when(ina >= inb) {
+              a_aux_reg(0) := ina - inb
+              t(bw - 1) := 1.U
+            }.otherwise {
+              a_aux_reg(0) := ina
+              t(bw - 1) := 0.U
+            }
+            result_reg(0) := t.asUInt
+            b_aux_reg(0) := inb
+          } else {
+            sr_out_valid(i) := sr_out_valid(i-1)
+            val shifted_b = (b_aux_reg(i - 1) >> 1).asUInt
+            val t = VecInit(wire_res(i - 1).asBools)
+            when(a_aux_reg(i - 1) >= shifted_b) {
+              a_aux_reg(i) := a_aux_reg(i - 1) - shifted_b
+              t(bw - 1 - i) := 1.U
+            }.otherwise {
+              a_aux_reg(i) := a_aux_reg(i - 1)
+              t(bw - 1 - i) := 0.U
+            }
+            result_reg(i) := t.asUInt
+            b_aux_reg(i) := shifted_b
+          }
+        }
+      }
+    }
+  }
+
   // Sqrt specialized for 1.fractional numbers (really useful for floating point normalized numbers)
   class frac_sqrt(bw: Int) extends Module{
     val io = IO(new Bundle(){

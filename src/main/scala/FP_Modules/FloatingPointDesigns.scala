@@ -501,19 +501,19 @@ object FloatingPointDesigns {
     postProcess_exp_subtractor.io.in_b := exp_wire(1) - bias // the second input
     postProcess_exp_subtractor.io.in_c := 0.U
 
-    val frac_divider = Module(new divider3((mantissa + 1)*2)).io
+    val frac_divider = Module(new frac_div((mantissa + 2))).io
     frac_divider.in_ready := io.in_en
     frac_divider.in_reset := false.B
     frac_divider.in_valid := io.in_valid
-    frac_divider.in_a := whole_frac_wire(0) ## (0.U((mantissa + 1).W))
-    frac_divider.in_b := whole_frac_wire(1)
+    frac_divider.in_a := whole_frac_wire(0) ## (0.U((1).W))
+    frac_divider.in_b := whole_frac_wire(1) ## (0.U((1).W))
 
-    val uo_check = ShiftRegister(exp_wire(1) < bias, mantissa + 1, io.in_en) //  if yes means we add to exp(0) else we do reg subtraction
-    val carry_flag = ShiftRegister(postProcess_exp_subtractor.io.out_c.asBool, mantissa + 1, io.in_en) // if(y0check) then lookout for cflag low implies overflow, else cflag high implies underflow
+    val uo_check = ShiftRegister(exp_wire(1) < bias, mantissa + 2, io.in_en) //  if yes means we add to exp(0) else we do reg subtraction
+    val carry_flag = ShiftRegister(postProcess_exp_subtractor.io.out_c.asBool, mantissa + 2, io.in_en) // if(y0check) then lookout for cflag low implies overflow, else cflag high implies underflow
     val msb_check = frac_divider.out_s((mantissa + 1))
-    val exp_sum = ShiftRegister(postProcess_exp_subtractor.io.out_s, mantissa + 1, io.in_en)
+    val exp_sum = ShiftRegister(postProcess_exp_subtractor.io.out_s, mantissa + 2, io.in_en)
 
-    val new_sign_reg = ShiftRegister(new_sign_wire,mantissa + 1,io.in_en)
+    val new_sign_reg = ShiftRegister(new_sign_wire,mantissa + 2,io.in_en)
 
 
     val u_flag_reg = Mux(uo_check,!carry_flag || ((exp_sum -& (!msb_check).asUInt) > max_exp), false.B) // if true, overflow detected
@@ -757,6 +757,9 @@ object FloatingPointDesigns {
     io.out_valid := ShiftRegister(io.in_valid, 3, io.in_en)
     io.out_s := norm_out_sign ## norm_out_exp ## norm_out_frac
   }
+
+
+
 
 
 
