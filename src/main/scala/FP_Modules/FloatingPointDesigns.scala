@@ -436,8 +436,10 @@ object FloatingPointDesigns {
 
   // ------------------------ Newer versions of adders,dividers, and multipliers (still experimental)-------------------------------
   // - reimplemented logic for overflows/underflow handling, so might not be perfect
+  // I used the following strategies for vivado synthesis: (Synth Strategy = perfthresholdcarry, Impl Strategy = Netdelay_low)
 
-  // Digit recurrence based division (cycles equivalent to bw)
+  // Digit recurrence based division (cycles equivalent to bw) - 430 Mhz
+  // 25 cycles for single precision
   class FP_div_bwccs(bw: Int) extends Module {
     require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
     val io = IO(new Bundle() {
@@ -529,7 +531,8 @@ object FloatingPointDesigns {
   }
 
 
-  // digit recurrence based fp square root
+  // digit recurrence based fp square root - 470 MHz
+  // 23 cycles for single precision
   class FP_sqrt_bwccs(bw: Int) extends Module {
     require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
     val io = IO(new Bundle() {
@@ -573,8 +576,9 @@ object FloatingPointDesigns {
     io.out_s := out_sign ## out_exp(exponent - 1, 0) ## out_frac
   }
 
-  // Low cycle multiplier (might need few more pipeline stages for optimal MOF)
-  class FP_mult_2ccs(bw: Int) extends Module {
+  // Low cycle multiplier - 340 MHz MOF (with DSP enabled)
+  // 3 cycles
+  class FP_mult_3ccs(bw: Int) extends Module {
     require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
     val io = IO(new Bundle() {
       val in_en = Input(Bool())
@@ -584,7 +588,7 @@ object FloatingPointDesigns {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_multiplier_bw${bw}_v2"
+    override def desiredName = s"FP_multiplier_bw${bw}_v3"
     val (exponent, mantissa) = bw match {
       case 16 => (5,10)
       case 32 => (8,23)
@@ -639,27 +643,27 @@ object FloatingPointDesigns {
     postProcess_exp_subtractor.io.in_c := 0.U
 
     val frac_multiplier = Module(new multiplier((mantissa + 1))).io
-    frac_multiplier.in_a := whole_frac_wire(0)
-    frac_multiplier.in_b := whole_frac_wire(1)
-    val uo_check = exp_wire(1) < bias
-    val carry_flag = postProcess_exp_subtractor.io.out_c.asBool
-    val msb_check = frac_multiplier.out_s((mantissa + 1) * 2 - 1)
-    val exp_sum = postProcess_exp_subtractor.io.out_s
+    frac_multiplier.in_a := ShiftRegister(whole_frac_wire(0), 1, io.in_en)
+    frac_multiplier.in_b := ShiftRegister(whole_frac_wire(1), 1, io.in_en)
+    val uo_check = ShiftRegister(exp_wire(1),2, io.in_en) < bias
+    val carry_flag = ShiftRegister(postProcess_exp_subtractor.io.out_c.asBool, 2, io.in_en)
+    val msb_check = ShiftRegister(frac_multiplier.out_s((mantissa + 1) * 2 - 1),1,io.in_en)
+    val exp_sum = ShiftRegister(postProcess_exp_subtractor.io.out_s, 2, io.in_en)
 
-    val u_flag_reg = ShiftRegister(Mux(uo_check,!carry_flag || ((exp_sum +& msb_check.asUInt) < min_exp), false.B), 1, io.in_en) // if true, underflow detected
-    val o_flag_reg = ShiftRegister(Mux(!uo_check,carry_flag || ((exp_sum +& msb_check.asUInt) > max_exp), false.B), 1, io.in_en) // if true, overflow detected
-    val new_sign_reg = ShiftRegister(new_sign_wire,1,io.in_en)
-    val new_exp_reg = ShiftRegister(exp_sum,1,io.in_en)
+    val u_flag_reg = ShiftRegister(Mux(uo_check,!carry_flag || ((exp_sum +& msb_check.asUInt) < min_exp), false.B), 0, io.in_en) // if true, underflow detected
+    val o_flag_reg = ShiftRegister(Mux(!uo_check,carry_flag || ((exp_sum +& msb_check.asUInt) > max_exp), false.B), 0, io.in_en) // if true, overflow detected
+    val new_sign_reg = ShiftRegister(new_sign_wire,2,io.in_en)
+    val new_exp_reg = ShiftRegister(exp_sum,0,io.in_en)
     val new_frac_reg = ShiftRegister(frac_multiplier.out_s,1,io.in_en)
 
-    io.out_valid := ShiftRegister(io.in_valid, 2, io.in_en)
+    io.out_valid := ShiftRegister(io.in_valid, 3, io.in_en)
     val out_sign = new_sign_reg
-    val out_exp = Mux(u_flag_reg, min_exp, Mux(o_flag_reg, max_exp, Mux(new_frac_reg((mantissa + 1) * 2 - 1), new_exp_reg + 1.U, new_exp_reg)))
-    val out_frac = Mux(u_flag_reg, min_frac, Mux(o_flag_reg, max_frac,Mux(new_frac_reg((mantissa + 1) * 2 - 1), new_frac_reg((mantissa + 1) * 2 - 2, mantissa + 1), new_frac_reg((mantissa + 1) * 2 - 3, mantissa))))
+    val out_exp = Mux(u_flag_reg, min_exp, Mux(o_flag_reg, max_exp, Mux(new_frac_reg((mantissa + 1) * 2 - 1).asBool, new_exp_reg + 1.U, new_exp_reg)))
+    val out_frac = Mux(u_flag_reg, min_frac, Mux(o_flag_reg, max_frac,Mux(new_frac_reg((mantissa + 1) * 2 - 1).asBool, new_frac_reg((mantissa + 1) * 2 - 2, mantissa + 1), new_frac_reg((mantissa + 1) * 2 - 3, mantissa))))
     io.out_s := ShiftRegister(out_sign ## out_exp ## out_frac,1,io.in_en)
   }
 
-  // Low cycle adder (I seem to get comparable MOF to my original 13 cycle adder i think)
+  // Low cycle adder (I seem to get comparable MOF to my original 13 cycle adder) - 370 MHz
   class FP_add_3ccs(bw: Int) extends Module {
     require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
     val io = IO(new Bundle() {
@@ -765,7 +769,7 @@ object FloatingPointDesigns {
 
   // -------------------------------- new designs for approximation based FP Units using Newton's method -----------------------------
   // - using the newer (experimental) adders and multipliers, if you want just change out the instantiations for old fp units and values for adder/mult latency
-  val mult_latency = 2
+  val mult_latency = 3
   val add_latency = 3
   class FP_recip_appx(bw: Int, NR: Int) extends Module {
     require(bw == 16 || bw == 32 || bw == 64 || bw == 128)
@@ -804,7 +808,7 @@ object FloatingPointDesigns {
     val result = Wire(UInt(bw.W)) // subtract the adjusted input from the magic number and we have the inverse square root immediately (although an approximation)
     result := magic_num - number
 
-    val recip_appx_mult = Module(new FP_mult_2ccs(bw)).io
+    val recip_appx_mult = Module(new FP_mult_3ccs(bw)).io
     recip_appx_mult.in_en := io.in_en
     recip_appx_mult.in_valid := io.in_valid
     recip_appx_mult.in_a := result
@@ -814,9 +818,9 @@ object FloatingPointDesigns {
     val xin = ShiftRegister(io.in_a, mult_latency, io.in_en)
 
     val NR_components = (0 until NR).map(i=>{
-      (Module(new FP_mult_2ccs(bw)).io,
+      (Module(new FP_mult_3ccs(bw)).io,
         Module(new FP_add_3ccs(bw)).io,
-        Module(new FP_mult_2ccs(bw)).io,
+        Module(new FP_mult_3ccs(bw)).io,
         Wire(UInt(bw.W)))
     })
 
@@ -868,7 +872,7 @@ object FloatingPointDesigns {
     })
     override def desiredName = s"FP_div_appx_${bw}"
     val recip_appx = Module(new FP_recip_appx(bw,NR)).io
-    val mult = Module(new FP_mult_2ccs(bw)).io
+    val mult = Module(new FP_mult_3ccs(bw)).io
     recip_appx.in_en := io.in_en
     recip_appx.in_valid := io.in_valid
     recip_appx.in_a := io.in_b
@@ -920,10 +924,10 @@ object FloatingPointDesigns {
     val xin = io.in_a(bw-1) ## (io.in_a(bw-2,mantissa) - 1.U) ## io.in_a(mantissa - 1, 0)
 
     val NR_components = (0 until NR).map(i=>{
-      (Module(new FP_mult_2ccs(bw)).io,
-        Module(new FP_mult_2ccs(bw)).io,
+      (Module(new FP_mult_3ccs(bw)).io,
+        Module(new FP_mult_3ccs(bw)).io,
         Module(new FP_add_3ccs(bw)).io,
-        Module(new FP_mult_2ccs(bw)).io,
+        Module(new FP_mult_3ccs(bw)).io,
         Wire(UInt(bw.W)))
     })
 
@@ -982,7 +986,7 @@ object FloatingPointDesigns {
     })
     override def desiredName = s"FP_sqrt_appx_${bw}"
     val isqrt_appx = Module(new FP_isqrt_appx(bw,NR)).io
-    val mult = Module(new FP_mult_2ccs(bw)).io
+    val mult = Module(new FP_mult_3ccs(bw)).io
     isqrt_appx.in_en := io.in_en
     isqrt_appx.in_valid := io.in_valid
     isqrt_appx.in_a := io.in_a
