@@ -1,6 +1,6 @@
 package Binary_Modules
 import chisel3._
-import chisel3.util._
+import chisel3.util.{log2Ceil, ShiftRegister, MuxCase, log2Floor, PriorityMux}
 
 object BinaryDesigns {
 

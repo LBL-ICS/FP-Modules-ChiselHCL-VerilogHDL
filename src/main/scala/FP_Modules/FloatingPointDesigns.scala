@@ -1,10 +1,7 @@
 package FP_Modules
 import Binary_Modules.BinaryDesigns._
 import chisel3._
-import chisel3.util.ShiftRegister
-import Chisel.{ log2Ceil, log2Floor}
-import chiseltest.RawTester.test
-import chisel3.tester._
+import chisel3.util.{ShiftRegister, log2Floor}
 
 import java.io.PrintWriter
 import scala.collection.mutable
@@ -1137,15 +1134,6 @@ object FloatingPointDesigns {
   }
 
 
-
-  def main(args: Array[String]) : Unit = {
-    val sw = new PrintWriter("FP_DDOT_dp.v")
-        sw.println(getVerilogString(new FP_DDOT_dp(32, 32)))
-        sw.close()
-    val sw2 = new PrintWriter("axpy.v")
-        sw2.println(getVerilogString(new axpy_dp(32, 256)))
-        sw2.close()
-  }
 
   // FP conversion IEEE 754
   def convert_IEEE754_to_Decimal(num: BigInt, bw: Int): BigDecimal = {
