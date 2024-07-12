@@ -49,5 +49,14 @@ object GetVerilog {
       ),
     )
 
+    (new ChiselStage).execute(
+      Array("--target", "systemverilog"),
+      Seq(ChiselGeneratorAnnotation(() => new FP_add_3ccs(32))
+        ,
+        FirtoolOption("--disable-all-randomization"),
+        FirtoolOption("-strip-debug-info")
+      ),
+    )
+
   }
 }

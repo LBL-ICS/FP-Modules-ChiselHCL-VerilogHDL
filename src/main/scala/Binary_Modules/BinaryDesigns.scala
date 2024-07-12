@@ -74,19 +74,6 @@ object BinaryDesigns {
     io.out_m := result_h.asUInt ## result_l
   }
 
-  class leadingOneDetector(bw: Int) extends Module{
-    //require(bw == 11 || bw == 24 || bw == 53 || bw ==113) // size of the mantissa + 1
-    val io = IO(new Bundle() { // one input, one output
-      val in = Input(UInt(bw.W))
-      val out = Output(UInt((log2Floor(bw) + 1).W))
-    })
-    val boolseq = for(i <- 0 until bw) yield {
-      (io.in(bw-1-i), (bw-i).U)
-    }
-    val hotValue = PriorityMux(boolseq.toSeq)
-    io.out := hotValue
-  }
-
   class twoscomplement(bw: Int) extends Module{
     val io = IO(new Bundle() {
       val in = Input(UInt(bw.W))
@@ -95,23 +82,6 @@ object BinaryDesigns {
     val x = Wire(UInt(bw.W))
     x := 1.U + ~(io.in)
     io.out := x
-  }
-
-  class shifter(bw: Int) extends Module{
-    val io = IO(new Bundle() {
-      val in_a = Input(UInt(bw.W))
-      val in_b = Input(UInt((log2Floor(bw) + 1).W))
-      val in_c = Input(UInt(1.W))
-      val out_s = Output(UInt(bw.W))
-    })
-    val result = Wire(UInt(bw.W))
-    result := 0.U
-    when(io.in_c === 1.U){ // shift right
-      result := io.in_a >> io.in_b
-    }.otherwise{
-      result := io.in_a << io.in_b // shift left
-    }
-    io.out_s := result
   }
 
   class full_adder(bw: Int) extends Module{
@@ -151,89 +121,6 @@ object BinaryDesigns {
     val result = Wire(UInt((bw*2).W))
     result := io.in_a * io.in_b
     io.out_s := result
-  }
-
-  class divider3(bw: Int) extends Module{
-    val io = IO(new Bundle(){
-      val in_ready = Input(Bool())
-      val in_valid = Input(Bool())
-      val in_reset = Input(Bool())
-      val in_a = Input(UInt(bw.W))
-      val in_b = Input(UInt(bw.W))
-      val out_s = Output(UInt(bw.W))
-      val out_r = Output(UInt(bw.W))
-      val out_valid = Output(Bool())
-    })
-    override def desiredName = s"divider_BW${bw}_v3"
-    //cc latency equal to bw/2
-    val a_aux_reg_w = Wire(Vec(bw/2, UInt(bw.W)))
-    a_aux_reg_w := VecInit.fill(bw/2)(0.U)
-    val a_aux_reg_r = RegInit(VecInit.fill(bw/2)(0.U(bw.W)))
-    val a_aux_reg = a_aux_reg_w.zip(a_aux_reg_r).flatMap(x => Vector(x._1, x._2)).toVector
-
-    val b_aux_reg_w = Wire(Vec(bw / 2, UInt(bw.W)))
-    b_aux_reg_w := VecInit.fill(bw/2)(0.U)
-    val b_aux_reg_r = RegInit(VecInit.fill(bw/2)(0.U(bw.W)))
-    val b_aux_reg = b_aux_reg_w.zip(b_aux_reg_r).flatMap(x => Vector(x._1, x._2)).toVector
-
-    val result_reg_w = Wire(Vec(bw/2, UInt(bw.W)))
-    result_reg_w := VecInit.fill(bw/2)(0.U(bw.W))
-    val result_reg_r = RegInit(VecInit.fill(bw/2)(0.U(bw.W)))
-    val result_reg = result_reg_w.zip(result_reg_r).flatMap(x => Vector(x._1, x._2)).toVector
-
-    val sr_out_valid_w = Wire(Vec(bw/2, Bool()))
-    sr_out_valid_w := VecInit.fill(bw/2)(false.B)
-    val sr_out_valid_r = RegInit(VecInit.fill(bw/2)(false.B))
-    val sr_out_valid = sr_out_valid_w.zip(sr_out_valid_r).flatMap(x => Vector(x._1, x._2)).toVector
-
-    val init_res = Wire(Vec(bw,UInt(1.W)))
-    init_res := VecInit.fill(bw)(0.U)
-    val wire_res = Wire(Vec(bw,Vec(bw,UInt(1.W))))
-    wire_res.zip(result_reg).foreach(x=>x._1 := VecInit(x._2.asBools))
-
-    io.out_valid := sr_out_valid.last
-    io.out_s := result_reg.last.asUInt
-    io.out_r  := a_aux_reg.last
-    when(io.in_ready){
-      when(io.in_reset){
-        a_aux_reg_r := VecInit.fill(bw/2)(0.U(bw.W))
-        b_aux_reg_r := VecInit.fill(bw/2)(0.U(bw.W))
-        result_reg_r := VecInit.fill(bw/2)(0.U(bw.W))
-        sr_out_valid_r := VecInit.fill(bw/2)(false.B)
-      }.otherwise {
-        sr_out_valid(0) := io.in_valid
-        for (i <- 0 until bw) {
-          if (i == 0) {
-            //            val compare = Wire(UInt(bw.W))
-            //            compare := (io.in_b << (bw - 1 - i)).asUInt
-            //            val compare = (io.in_b << (bw - 1 - i)).asUInt
-            when(io.in_a >= (io.in_b << (bw - 1 - i)).asUInt) {
-              a_aux_reg(0) := io.in_a - (io.in_b << (bw - 1 - i)).asUInt
-              init_res(bw - 1 - i) := 1.U
-            }.otherwise {
-              a_aux_reg(0) := io.in_a
-              init_res(bw - 1 - i) := 0.U
-            }
-            result_reg(0) := init_res.asUInt
-            b_aux_reg(0) := io.in_b
-          } else {
-            //            val compare = Wire(UInt(bw.W))
-            //            compare := (b_aux_reg(i - 1) << (bw - 1 - i)).asUInt
-            //            val compare = (b_aux_reg(i - 1) << (bw - 1 - i)).asUInt
-            sr_out_valid(i) := sr_out_valid(i-1)
-            when(a_aux_reg(i - 1) >= (b_aux_reg(i - 1) << (bw - 1 - i)).asUInt) {
-              a_aux_reg(i) := a_aux_reg(i - 1) - (b_aux_reg(i - 1) << (bw - 1 - i)).asUInt
-              wire_res(i - 1)(bw - 1 - i) := 1.U
-            }.otherwise {
-              a_aux_reg(i) := a_aux_reg(i - 1)
-              wire_res(i - 1)(bw - 1 - i) := 0.U
-            }
-            result_reg(i) := wire_res(i - 1).asUInt
-            b_aux_reg(i) := b_aux_reg(i - 1)
-          }
-        }
-      }
-    }
   }
 
   // special division focused on 1.fractional numbers (for floating point application specifically)
@@ -356,40 +243,4 @@ object BinaryDesigns {
     }
   }
 
-  // - experimental designs
-  // goldschmidt divider ?? idk if I implemented right
-  class GS_DIV(bw: Int, iter: Int) extends Module{
-    val io = IO(new Bundle(){
-      val in_en = Input(Bool())
-      val in_dividend = Input(UInt(bw.W))
-      val in_divisor = Input(UInt(bw.W))
-      val out_quotient = Output(UInt(bw.W))
-      val out_lo = Output(UInt(log2Ceil(bw).W))
-    })
-    val a,b = RegInit(VecInit.fill(iter+1)(0.U((bw*2).W)))
-    val mults = VecInit.fill(iter, 2)(Module(new multiplier(bw*2)).io)
-    mults.foreach(_.foreach(x=>{
-      x.in_a := 0.U
-      x.in_b := 0.U
-    }))
-    val q = a(iter)(bw * 2 - 1, bw) + a(iter)(bw - 1, bw - 3).orR
-    io.out_quotient := q
-    io.out_lo := VecInit(q.asBools).lastIndexWhere(x=>x)
-    when(io.in_en){
-      for(i <- 0 until iter+1){
-        if(i == 0){
-          a(0) := 0.U(1.W) ## io.in_dividend ## 0.U((bw-1).U)
-          b(0) := 0.U(1.W) ## io.in_divisor ## 0.U((bw-1).U)
-        }else{
-          val two_minus_b = (~b(i-1)).asUInt + 1.U
-          mults(i-1)(0).in_a := a(i-1)
-          mults(i-1)(0).in_b := two_minus_b
-          mults(i-1)(1).in_a := b(i-1)
-          mults(i-1)(1).in_b := two_minus_b
-          a(i) := mults(i-1)(0).out_s((bw*2*2)-2,bw*2 - 1) // the msb 0 never change
-          b(i) := mults(i-1)(1).out_s((bw*2*2)-2,bw*2 - 1)
-        }
-      }
-    }
-  }
 }

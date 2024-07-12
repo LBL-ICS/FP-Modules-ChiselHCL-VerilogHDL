@@ -585,7 +585,7 @@ object FloatingPointDesigns {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_multiplier_bw${bw}_v3"
+    override def desiredName = s"FP_mult_${bw}"
     val (exponent, mantissa) = bw match {
       case 16 => (5,10)
       case 32 => (8,23)
@@ -634,18 +634,18 @@ object FloatingPointDesigns {
     new_sign_wire := sign_wire(0) ^ sign_wire(1)
 
     // subtract exponent value of the second input from the bias value
-    val postProcess_exp_subtractor = Module(new full_adder(exponent))
-    postProcess_exp_subtractor.io.in_a := exp_wire(0) // the bias
-    postProcess_exp_subtractor.io.in_b := exp_wire(1) - bias // the second input
-    postProcess_exp_subtractor.io.in_c := 0.U
+    val exp_adder = Module(new full_adder(exponent))
+    exp_adder.io.in_a := exp_wire(0) // the bias
+    exp_adder.io.in_b := exp_wire(1) - bias // the second input
+    exp_adder.io.in_c := 0.U
 
     val frac_multiplier = Module(new multiplier((mantissa + 1))).io
     frac_multiplier.in_a := ShiftRegister(whole_frac_wire(0), 1, io.in_en)
     frac_multiplier.in_b := ShiftRegister(whole_frac_wire(1), 1, io.in_en)
     val uo_check = ShiftRegister(exp_wire(1),2, io.in_en) < bias
-    val carry_flag = ShiftRegister(postProcess_exp_subtractor.io.out_c.asBool, 2, io.in_en)
+    val carry_flag = ShiftRegister(exp_adder.io.out_c.asBool, 2, io.in_en)
     val msb_check = ShiftRegister(frac_multiplier.out_s((mantissa + 1) * 2 - 1),1,io.in_en)
-    val exp_sum = ShiftRegister(postProcess_exp_subtractor.io.out_s, 2, io.in_en)
+    val exp_sum = ShiftRegister(exp_adder.io.out_s, 2, io.in_en)
 
     val u_flag_reg = ShiftRegister(Mux(uo_check,!carry_flag || ((exp_sum +& msb_check.asUInt) < min_exp), false.B), 0, io.in_en) // if true, underflow detected
     val o_flag_reg = ShiftRegister(Mux(!uo_check,carry_flag || ((exp_sum +& msb_check.asUInt) > max_exp), false.B), 0, io.in_en) // if true, overflow detected
@@ -671,7 +671,7 @@ object FloatingPointDesigns {
       val out_s = Output(UInt(bw.W))
       val out_valid = Output(Bool())
     })
-    override def desiredName = s"FP_adder_bw${bw}_v2"
+    override def desiredName = s"FP_add_${bw}"
     val (exponent, mantissa) = bw match {
       case 16 => (5,10)
       case 32 => (8,23)
@@ -715,17 +715,17 @@ object FloatingPointDesigns {
     whole_frac_wire(0) := 1.U ## frac_wire(0)
     whole_frac_wire(1) := 1.U ## frac_wire(1)
 
-    val postProcess_exp_subtractor = Module(new full_subtractor(exponent))
-    postProcess_exp_subtractor.io.in_a := exp_wire(0)
-    postProcess_exp_subtractor.io.in_b := exp_wire(1)
-    postProcess_exp_subtractor.io.in_c := 0.U
+    val exp_subtractor = Module(new full_subtractor(exponent))
+    exp_subtractor.io.in_a := exp_wire(0)
+    exp_subtractor.io.in_b := exp_wire(1)
+    exp_subtractor.io.in_c := 0.U
 
     val eqexp_arrange = Mux(exp_wire(0)===exp_wire(1),whole_frac_wire(1) > whole_frac_wire(0),false.B)
-    val redundant_op = ShiftRegister(Mux(postProcess_exp_subtractor.io.out_c.asBool, (~postProcess_exp_subtractor.io.out_s).asUInt + 1.U, postProcess_exp_subtractor.io.out_s) > mantissa.U,1,io.in_en)
-    val fracadd_in_a = ShiftRegister(Mux(postProcess_exp_subtractor.io.out_c.asBool, whole_frac_wire(1), whole_frac_wire(eqexp_arrange)),1,io.in_en) // selects the larger num of the two
-    val fracadd_in_b = ShiftRegister(Mux(postProcess_exp_subtractor.io.out_c.asBool, whole_frac_wire(0) >> ((~postProcess_exp_subtractor.io.out_s).asUInt + 1.U), whole_frac_wire(!eqexp_arrange) >> postProcess_exp_subtractor.io.out_s),1,io.in_en)
-    val ref_exp = ShiftRegister(Mux(postProcess_exp_subtractor.io.out_c.asBool, exp_wire(1),exp_wire(0)),2,io.in_en) // the larger exp of the two is reference
-    val ref_sign = ShiftRegister(Mux(postProcess_exp_subtractor.io.out_c.asBool, sign_wire(1),sign_wire(eqexp_arrange)),1,io.in_en) // same with sign and so
+    val redundant_op = ShiftRegister(Mux(exp_subtractor.io.out_c.asBool, (~exp_subtractor.io.out_s).asUInt + 1.U, exp_subtractor.io.out_s) > mantissa.U,1,io.in_en)
+    val fracadd_in_a = ShiftRegister(Mux(exp_subtractor.io.out_c.asBool, whole_frac_wire(1), whole_frac_wire(eqexp_arrange)),1,io.in_en) // selects the larger num of the two
+    val fracadd_in_b = ShiftRegister(Mux(exp_subtractor.io.out_c.asBool, whole_frac_wire(0) >> ((~exp_subtractor.io.out_s).asUInt + 1.U), whole_frac_wire(!eqexp_arrange) >> exp_subtractor.io.out_s),1,io.in_en)
+    val ref_exp = ShiftRegister(Mux(exp_subtractor.io.out_c.asBool, exp_wire(1),exp_wire(0)),2,io.in_en) // the larger exp of the two is reference
+    val ref_sign = ShiftRegister(Mux(exp_subtractor.io.out_c.asBool, sign_wire(1),sign_wire(eqexp_arrange)),1,io.in_en) // same with sign and so
     val diff_sign = ShiftRegister(sign_wire(0) ^ sign_wire(1), 1, io.in_en) // need to check if signs are diff, if yes then we know result cannot grow so look out for leading zeros in frac sum else result may grow so check for frac sum carry
 
 
